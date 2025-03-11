@@ -1,104 +1,81 @@
-import { Webhook } from "svix";
-import { headers } from "next/headers";
-import { WebhookEvent } from "@clerk/nextjs/server";
 import { env } from "@/data/env/server";
 import { deleteUser, insertUser, updateUser } from "@/features/users/db/users";
-import { syncUserClerkMetaData } from "@/app/services/clerk";
+import { syncClerkUserMetadata } from "@/services/clerk";
+import { WebhookEvent } from "@clerk/nextjs/server";
+import { headers } from "next/headers";
+import { Webhook } from "svix";
 
 export async function POST(req: Request) {
-  const SIGNING_SECRET = env.CLERK_WEBHOOK_SECRET;
-
-  if (!SIGNING_SECRET) {
-    throw new Error(
-      "Error: Please add SIGNING_SECRET from Clerk Dashboard to .env or .env"
-    );
-  }
-
-  // Create new Svix instance with secret
-  const wh = new Webhook(SIGNING_SECRET);
-
-  // Get headers
   const headerPayload = await headers();
-  const svix_id = headerPayload.get("svix-id");
-  const svix_timestamp = headerPayload.get("svix-timestamp");
-  const svix_signature = headerPayload.get("svix-signature");
+  const svixId = headerPayload.get("svix-id");
+  const svixTimestamp = headerPayload.get("svix-timestamp");
+  const svixSignature = headerPayload.get("svix-signature");
 
-  // If there are no headers, error out
-  if (!svix_id || !svix_timestamp || !svix_signature) {
-    return new Response("Error: Missing Svix headers", {
+  if (!svixId || !svixTimestamp || !svixSignature) {
+    return new Response("Error occurred -- no svix headers", {
       status: 400,
     });
   }
 
-  // Get body
   const payload = await req.json();
   const body = JSON.stringify(payload);
 
-  let evt: WebhookEvent;
+  const wh = new Webhook(env.CLERK_WEBHOOK_SECRET);
+  let event: WebhookEvent;
 
-  // Verify payload with headers
   try {
-    evt = wh.verify(body, {
-      "svix-id": svix_id,
-      "svix-timestamp": svix_timestamp,
-      "svix-signature": svix_signature,
+    event = wh.verify(body, {
+      "svix-id": svixId,
+      "svix-timestamp": svixTimestamp,
+      "svix-signature": svixSignature,
     }) as WebhookEvent;
   } catch (err) {
-    console.error("Error: Could not verify webhook:", err);
-    return new Response("Error: Verification error", {
+    console.error("Error verifying webhook:", err);
+    return new Response("Error occurred", {
       status: 400,
     });
   }
 
-  switch (evt.type) {
+  switch (event.type) {
     case "user.created":
     case "user.updated": {
-      const email = evt?.data.email_addresses.find(
-        (email) => email.id === evt.data.primary_email_address_id
+      const email = event.data.email_addresses.find(
+        (email) => email.id === event.data.primary_email_address_id
       )?.email_address;
+      const name = `${event.data.first_name} ${event.data.last_name}`.trim();
+      if (email == null) return new Response("No email", { status: 400 });
+      if (name === "") return new Response("No name", { status: 400 });
 
-      const name = `${evt?.data.first_name} ${evt.data.last_name}`.trim();
-
-      if (!email)
-        return new Response("Error: No email", {
-          status: 400,
-        });
-
-      if (!name)
-        return new Response("Error: No name", {
-          status: 400,
-        });
-
-      if (evt.type === "user.created") {
+      if (event.type === "user.created") {
         const user = await insertUser({
-          clerkUserId: evt.data.id,
+          clerkUserId: event.data.id,
           email,
           name,
-          imageUrl: evt.data.image_url,
+          imageUrl: event.data.image_url,
           role: "user",
         });
 
-        if (user) syncUserClerkMetaData(user);
+        await syncClerkUserMetadata(user);
       } else {
         await updateUser(
-          { clerkUserId: evt.data.id },
+          { clerkUserId: event.data.id },
           {
             email,
             name,
-            imageUrl: evt.data.image_url,
-            role: evt.data.public_metadata.role,
+            imageUrl: event.data.image_url,
+            role: event.data.public_metadata.role,
           }
         );
       }
       break;
     }
     case "user.deleted": {
-      if (evt.data.id) await deleteUser({ clerkUserId: evt.data.id });
+      if (event.data.id != null) {
+        await deleteUser({ clerkUserId: event.data.id });
+      }
       break;
     }
   }
 
-  return new Response("Success: User deleted", {
-    status: 200,
-  });
+  return new Response("", { status: 200 });
 }
